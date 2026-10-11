@@ -1165,6 +1165,49 @@ const TEMPLATE_XLSX_BASE64 = "UEsDBAoAAAAAAIdO4kAAAAAAAAAAAAAAAAAJAAAAZG9jUHJvcH
     }
   }
 
+  // 把"选项识别正则"（形如 ^\s*([A-H])[\.、．\)\s]\s*(.+)$）转成一个
+  // 不锚定行首/行尾、可以在一行中间反复命中的版本，用于探测
+  // "A. xxx B. xxx C. xxx D. xxx" 这种四个选项挤在同一行里的写法。
+  // 只去掉首尾的 ^ 和 (.+)$（避免贪婪吞掉后面的其他选项），
+  // 转换失败时退化为一个通用的 "字母 + 分隔符" 探测正则。
+  function buildInlineOptionScanRe(pattern){
+    try{
+      let p = pattern.trim();
+      if(p.startsWith('^')) p = p.slice(1);
+      if(p.startsWith('\\s*')) p = p.slice(3);
+      // 把末尾的 \s*(.+)$ 替换成非贪婪、不含后续选项标记的捕获
+      p = p.replace(/\\s\*\(\.\+\)\$$/, '\\s*');
+      return new RegExp(p, 'g');
+    }catch(e){
+      return /([A-H])[\.、．\)]\s*/g;
+    }
+  }
+
+  // 检测一行文字中是否包含"多个选项挤在一起"的情况，若是则拆分成
+  // [{letter, text}, ...]；若一行只有 0 或 1 个选项标记，返回 null，
+  // 交给原有的逐行 optRe 匹配流程处理（保持原有行为不变）。
+  function splitInlineOptions(line, markerRe){
+    const positions = [];
+    let m;
+    markerRe.lastIndex = 0;
+    while((m = markerRe.exec(line)) !== null){
+      positions.push({ letter: m[1].toUpperCase(), markerStart: m.index, contentStart: m.index + m[0].length });
+      if(m[0].length === 0) markerRe.lastIndex++; // 防止零宽匹配死循环
+    }
+    if(positions.length < 2) return null; // 不足两个选项标记，不算"同行多选项"
+
+    const items = [];
+    for(let i=0;i<positions.length;i++){
+      const start = positions[i].contentStart;
+      const end = (i+1 < positions.length) ? positions[i+1].markerStart : line.length;
+      const text = line.slice(start, end).trim();
+      if(text.length > 0){
+        items.push({ letter: positions[i].letter, text });
+      }
+    }
+    return items.length >= 2 ? items : null;
+  }
+
   function findSectionRanges(paragraphs, cfg){
     const singleKw = splitKw(cfg.cfg_single_kw);
     const multiKw = splitKw(cfg.cfg_multi_kw);
@@ -1257,6 +1300,7 @@ const TEMPLATE_XLSX_BASE64 = "UEsDBAoAAAAAAIdO4kAAAAAAAAAAAAAAAAAJAAAAZG9jUHJvcH
   function parseDocxQuestions(paragraphs, cfg){
     const qnumRe = buildQuestionNumRe(cfg.cfg_qnum_re);
     const optRe = buildOptionRe(cfg.cfg_opt_re);
+    const inlineOptScanRe = buildInlineOptionScanRe(cfg.cfg_opt_re);
 
     const sections = findSectionRanges(paragraphs, cfg);
 
@@ -1294,6 +1338,13 @@ const TEMPLATE_XLSX_BASE64 = "UEsDBAoAAAAAAIdO4kAAAAAAAAAAAAAAAAAJAAAAZG9jUHJvcH
           options: [],
           sectionType: currentSectionType
         };
+        continue;
+      }
+
+      // 先检查这一行是不是"多个选项挤在同一行"（如 "A. xxx B. xxx C. xxx D. xxx"）
+      const inlineOpts = current ? splitInlineOptions(line, inlineOptScanRe) : null;
+      if(inlineOpts && current){
+        inlineOpts.forEach(o => current.options.push(o));
         continue;
       }
 
@@ -1796,7 +1847,6 @@ const TEMPLATE_XLSX_BASE64 = "UEsDBAoAAAAAAIdO4kAAAAAAAAAAAAAAAAAJAAAAZG9jUHJvcH
   }
 
 })();
-
 </script>
 
 </body>
